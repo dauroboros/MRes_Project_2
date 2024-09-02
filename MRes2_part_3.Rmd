@@ -1,0 +1,922 @@
+# This is part 3 of Project 2
+
+# This file contains code to create the following plots: prostate cancer subtypes heatmap on a basis of consensus clustering using RNAseq data, PCA analysis for this data, pathway enrichment analysis (GSEA) associated with subtypes, correlation analysis between B cell subtypes, CD biomarkers and hallmarks of cancer.
+
+```{r}
+
+# Step 2: import libraries and data
+
+library(GSVA)
+library(ComplexHeatmap)
+library(dplyr)
+library(tidyverse)
+library(PAC)
+library(ggfortify)
+library(cluster)
+library(ConsensusClusterPlus)
+library(GenomicFeatures)
+library(org.Hs.eg.db)
+library(AnnotationHub)
+library(biomaRt)
+library(viridis)
+library(ggpubr)
+library(gridExtra)
+library(grid)
+
+
+
+ig_data <- read_csv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/Subtypes_analysis/IG_data_by_sample.csv')
+
+load('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/Subtypes_analysis/NEPC.gene.list.RData')
+load('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/Subtypes_analysis/SU2C_matrix.RData')
+
+gene_names <- NEPC.gene.list$Nelson$GENE_ID
+gene_class <- NEPC.gene.list$Nelson$class
+gene_matrix <- as.data.frame(SU2C_matrix)
+gene_data <- data.frame(Gene_Name = gene_names, Gene_Class = gene_class)
+
+
+```
+
+
+```{r}
+
+# Step 3: subset genes of interest from gene matrix
+
+genes_of_interest <- gene_matrix[rownames(gene_matrix) %in% gene_data$Gene_Name, ]
+genes_interest_matrix <- data.matrix(genes_of_interest, rownames.force = NA)
+genes_interest_normalized <- log2(genes_interest_matrix + 1)
+genes_interest_normalized <- as.matrix(genes_interest_normalized)
+genes_interest_normalized <- scale(genes_interest_normalized)
+
+```
+
+```{r}
+genes_interest_normalized_for_heatmap <- as.data.frame(genes_interest_normalized)
+genes_interest_normalized_for_heatmap$Gene_Name <- rownames(genes_interest_normalized_for_heatmap)
+```
+
+
+```{r}
+merged_data_gene_names_tests <- merge(genes_interest_normalized_for_heatmap, gene_data, by.x = "Gene_Name", by.y = "Gene_Name")
+```
+
+
+```{r}
+merged_data_gene_names_tests <- merged_data_gene_names_tests[match(rownames(genes_interest_normalized_for_heatmap), merged_data_gene_names_tests$Gene_Name), ]
+rownames(merged_data_gene_names_tests) <- merged_data_gene_names_tests$Gene_Name
+merged_data_gene_names_tests$Gene_Name <- NULL
+```
+
+
+```{r}
+merged_data_gene_names_tests$Gene_Class <- as.character(merged_data_gene_names_tests$Gene_Class)
+```
+
+
+```{r}
+genes_interest_normalized_for_heatmap <- merged_data_gene_names_tests[order(merged_data_gene_names_tests$Gene_Class), ]
+genes_interest_normalized_for_heatmap$Gene_Class <- NULL
+genes_interest_normalized_for_heatmap <- as.matrix(genes_interest_normalized_for_heatmap)
+```
+
+
+```{r}
+matrix_AR <- genes_interest_normalized_for_heatmap[genes_interest_normalized_for_heatmap$Gene_Class == "AR", ]
+matrix_AR$Gene_Class <- NULL
+matrix_AR <- as.matrix(matrix_AR)
+
+matrix_NE1 <- genes_interest_normalized_for_heatmap[genes_interest_normalized_for_heatmap$Gene_Class == "NE1", ]
+matrix_NE1$Gene_Class <- NULL
+matrix_NE1 <- as.matrix(matrix_NE1)
+
+matrix_NE2 <- genes_interest_normalized_for_heatmap[genes_interest_normalized_for_heatmap$Gene_Class == "NE2", ]
+matrix_NE2$Gene_Class <- NULL
+matrix_NE2 <- as.matrix(matrix_NE2)
+
+matrix_SQUAM <- genes_interest_normalized_for_heatmap[genes_interest_normalized_for_heatmap$Gene_Class == "SQUAM", ]
+matrix_SQUAM$Gene_Class <- NULL
+matrix_SQUAM <- as.matrix(matrix_SQUAM)
+
+```
+
+
+```{r}
+# Step 4: get genome names and length data for further normalization
+
+gtf_url <- "ftp://ftp.ensembl.org/pub/release-104/gtf/homo_sapiens/Homo_sapiens.GRCh38.104.gtf.gz"
+gtf_file <- "Homo_sapiens.GRCh38.104.gtf.gz"
+download.file(gtf_url, gtf_file)
+
+txdb <- makeTxDbFromGFF(gtf_file, format = "gtf")
+```
+
+
+```{r}
+exons_list <- exonsBy(txdb, by="gene")
+gene_lengths <- sum(width(reduce(exons_list)))
+
+gene_lengths_df <- data.frame(gene_id = names(gene_lengths), length = gene_lengths)
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl")
+
+gene_symbols <- getBM(attributes = c('ensembl_gene_id', 'hgnc_symbol'), 
+                      filters = 'ensembl_gene_id', 
+                      values = gene_lengths_df$gene_id, 
+                      mart = mart)
+
+gene_lengths_df <- merge(gene_lengths_df, gene_symbols, by.x = 'gene_id', by.y = 'ensembl_gene_id', all.x = TRUE)
+
+head(gene_lengths_df)
+
+gene_lengths_df_clean <- subset(gene_lengths_df, select = -gene_id)
+gene_lengths_df_reord <- gene_lengths_df[, c("hgnc_symbol", "length")]
+colnames(gene_lengths_df_reord) <- c("gene_id", "length")
+
+```
+
+```{r}
+genes_interest_matrix_hm <- genes_interest_matrix
+genes_interest_matrix_hm <- as.data.frame(genes_interest_matrix_hm)
+genes_interest_matrix_hm$gene_id <- rownames(genes_interest_matrix_hm)
+merged_df_hm <- merge(gene_lengths_df_reord, genes_interest_matrix_hm, by = "gene_id")
+
+TPM <- data.frame(gene_id = merged_df_hm$gene_id)
+
+for (sample_id in colnames(genes_interest_matrix_hm)[-ncol(genes_interest_matrix_hm)]) {
+  sample_rpk_col <- paste0(sample_id, "_RPK")
+  
+  merged_df_hm[[sample_rpk_col]] <- merged_df_hm[[sample_id]] / (merged_df_hm$length / 1000)
+  
+  scaling_factor <- sum(merged_df_hm[[sample_rpk_col]]) / 1e6
+  
+  TPM[[sample_id]] <- merged_df_hm[[sample_rpk_col]] / scaling_factor
+}
+
+rownames(TPM) <- TPM$gene_id
+TPM$gene_id <- NULL
+```
+
+
+```{r}
+log2_TPM <- log2(TPM + 1)
+
+log2_TPM_matrix <- as.matrix(log2_TPM)
+
+```
+
+
+```{r}
+
+# Step 4: perform consensus clustering on genes of interest expression data
+
+title = "/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/Subtypes_analysis/consensus_plots"
+maxK <- 6
+results <- ConsensusClusterPlus(genes_interest_normalized,maxK=maxK,reps=5000,pItem=0.8,pFeature=1, title=title,clusterAlg="hc", innerLinkage = 'complete', distance="euclidean", plot= 'png')
+icl = calcICL(results,title=title,plot="png")
+```
+
+```{r}
+# Step 5: perform PAC analysis to select an optimal number of clusters for further analysis
+
+Kvec = 2:maxK
+x1 = 0.1; x2 = 0.9 # threshold defining the intermediate sub-interval
+PAC = rep(NA,length(Kvec))
+names(PAC) = paste("K=",Kvec,sep="") # from 2 to maxK
+for(i in Kvec){
+M = results[[i]]$consensusMatrix
+Fn = ecdf(M[lower.tri(M)])
+PAC[i-1] = Fn(x2) - Fn(x1)
+}#end for i
+# The optimal K
+optK = Kvec[which.min(PAC)]
+print(optK)
+
+
+```
+
+
+```{r}
+# Step 6: select consensusClass object within K=5 output and convert numerical values it into C1-C4 subtypes
+
+clusters <- results[[4]]$consensusClass
+df <- as.data.frame(clusters)
+df <- df %>%
+mutate(clusters = ifelse(clusters == 1, "C1", ifelse(clusters == 2, "C2", ifelse(clusters == 3, "C3", ifelse(clusters == 4, "C4", clusters)))))
+
+df_t <- t(df)
+```
+
+```{r}
+heatmaps <- list()
+cluster_ids <- unique(clusters)
+cluster_colors <- structure(c("#1f77b4", "#ff7f0e", 'darkgreen','purple'), names = cluster_ids)
+
+
+```
+
+```{r}
+rowData.Heatmap <- data.frame(GO=NEPC.gene.list$Nelson$class)
+
+
+```
+
+
+```{r}
+for (cluster_id in cluster_ids) {
+  samples_in_cluster <- names(clusters[clusters == cluster_id])
+  subset_FKPM <- genes_interest_normalized_for_heatmap[, samples_in_cluster]
+  if (cluster_id == 1) {
+    cluster_1_subset_FKPM <- subset_FKPM
+  }
+  
+  row_split_vector <- factor(rowData.Heatmap$GO[match(rownames(subset_FKPM), NEPC.gene.list$Nelson$GENE_ID)],
+                             levels = c('NE1', 'NE2', 'AR', 'SQUAM'))
+  
+  row_order_vector <- NEPC.gene.list$Nelson$GENE_ID[NEPC.gene.list$Nelson$GENE_ID %in% rownames(subset_FKPM)]
+
+  
+  col_anno <- HeatmapAnnotation(Cluster = as.factor(clusters[samples_in_cluster]),
+                                col = list(Cluster = cluster_colors), show_legend = TRUE,
+                                show_annotation_name = FALSE, gp = gpar(col = "black"),
+                                annotation_label = "Clusters"
+                                )
+  
+  show_legend <- ifelse(cluster_id == 1, TRUE, FALSE)
+
+  
+  heatmap <- Heatmap(subset_FKPM,
+                     name = paste("Cluster", cluster_id),
+                     show_column_names = FALSE,
+                     top_annotation = col_anno,
+                     show_heatmap_legend = show_legend,
+                     heatmap_legend_param = list (title = "log2 FKPM Z-score",
+                                                  direction = "horizontal",
+                                                  title_position = "topcenter"),
+                     row_names_gp = gpar(fontsize = 6),
+                     cluster_rows = FALSE,
+                     row_order = row_order_vector,
+                     row_split = row_split_vector
+
+
+                     )
+  heatmaps[[cluster_id]] <- heatmap
+}
+combined_heatmap_full <- heatmaps[[1]]
+for (i in 2:length(heatmaps)) {
+  combined_heatmap_full <- combined_heatmap_full + heatmaps[[i]]
+}
+
+draw(combined_heatmap_full,heatmap_legend_side = "bottom", annotation_legend_side = "right", column_title = "SU2C cohort selected genes expression (n = 24)")
+```
+
+```{r}
+for (cluster_id in cluster_ids) {
+  samples_in_cluster <- names(clusters[clusters == cluster_id])
+  subset_FKPM <- matrix_NE1[, samples_in_cluster]
+  if (cluster_id == 1) {
+    cluster_1_subset_FKPM <- subset_FKPM
+  }
+  col_anno <- HeatmapAnnotation(Cluster = as.factor(clusters[samples_in_cluster]),
+                                col = list(Cluster = cluster_colors), show_legend = TRUE,
+                                show_annotation_name = FALSE, gp = gpar(col = "black"),
+                                annotation_label = "Clusters"
+                                )
+  
+  show_legend <- ifelse(cluster_id == 1, TRUE, FALSE)
+
+  
+  heatmap <- Heatmap(subset_FKPM,
+                     name = paste("Cluster", cluster_id),
+                     show_column_names = FALSE,
+                     top_annotation = col_anno,
+                     show_heatmap_legend = show_legend,
+                     heatmap_legend_param = list (title = "log2 FKPM Z-score",
+                                                  direction = "horizontal",
+                                                  title_position = "topcenter"),
+                     row_names_gp = gpar(fontsize = 6),
+                     cluster_rows = FALSE
+
+
+                     )
+  heatmaps[[cluster_id]] <- heatmap
+}
+combined_heatmap_NE1 <- heatmaps[[1]]
+for (i in 2:length(heatmaps)) {
+  combined_heatmap_NE1 <- combined_heatmap_NE1 + heatmaps[[i]]
+}
+
+grob_heatmap_NE1 <- grid.grabExpr(draw(combined_heatmap_NE1, show_heatmap_legend = FALSE, show_annotation_legend = FALSE))
+
+
+#draw(combined_heatmap_NE1,heatmap_legend_side = "bottom", annotation_legend_side = "right", column_title = "SU2C cohort selected genes expression (n = 24)")
+```
+
+
+```{r}
+
+# Capture combined_heatmap_NE1 as a grob
+grob_heatmap_AR <- grid.grabExpr(draw(combined_heatmap_AR, show_heatmap_legend = FALSE, show_annotation_legend = FALSE))
+
+# Capture combined_heatmap_NE2 as a grob
+grob_heatmap_NE1 <- grid.grabExpr(draw(combined_heatmap_NE1, show_heatmap_legend = FALSE, show_annotation_legend = FALSE))
+
+# Create a new page and arrange both heatmaps vertically
+grid.newpage()
+grid.arrange(grob_heatmap_AR, grob_heatmap_NE1, ncol = 1)
+
+# Draw the legends separately (from combined_heatmap_NE1, since they are the same)
+draw(combined_heatmap_AR, heatmap_legend_side = "bottom", annotation_legend_side = "right", show_heatmap_legend = TRUE, show_annotation_legend = TRUE, newpage = FALSE)
+
+```
+
+
+
+
+```{r}
+# Step 7: create a PCA plot with clusters C1-С5
+
+cluster_colors_PCA <- c("#1f77b4", "#ff7f0e", 'darkgreen','purple')
+
+
+genes_of_interest_t <- t(genes_interest_normalized)
+pca_res <- prcomp(genes_of_interest_t, scale. = TRUE)
+autoplot(fanny(genes_of_interest_t,4), data = df, colour = "clusters", frame = TRUE) +
+  scale_colour_manual(values = cluster_colors_PCA) +
+  scale_fill_manual(values = cluster_colors_PCA)
+
+
+```
+
+```{r}
+# Step 8: import GSEA file
+
+gsea <- read_tsv("/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/SU2C_BCR_clinical_relevance/gsva.SU2C.txt")
+
+```
+
+```{r}
+# Step 9: merge GSEA file with cluster data
+
+gsea <- gsea %>%
+  column_to_rownames( var = "PATHWAYS")
+```
+
+
+```{r}
+gsea_df <- as.data.frame(gsea)
+df_t_renew <- as.data.frame(df_t)
+
+names(gsea_df) <- sapply(names(gsea_df), as.character)
+names(df_t_renew) <- sapply(names(df_t_renew), as.character)
+
+```
+
+
+```{r}
+merged_data <- rbind.data.frame(gsea_df,df_t_renew)
+merged_data_t <- t(merged_data)
+```
+
+
+```{r}
+keksus <- as.data.frame(merged_data_t)
+
+keksus <- keksus %>%
+  mutate(across(1:50, as.numeric))
+
+colnames_keksus <- c(names(keksus))
+colnames_keksus <- colnames_keksus[-length(colnames_keksus)]
+```
+
+```{r}
+# Step 10: aggregate
+
+gsea_sum <- keksus %>%
+  group_by(clusters) %>%
+  summarise(across(all_of(colnames_keksus),mean, na.rm = TRUE))
+
+gsea_sum_t <- t(gsea_sum)
+```
+
+
+```{r}
+# Step 11: Create a heatmap
+
+z_normalize <- function(x) {
+  (x - rowMeans(x)) / apply(x, 1, sd)
+}
+
+heatmap_gsea <- as.matrix(gsea_sum[,-1])
+rownames(heatmap_gsea) <- gsea_sum$clusters
+
+heatmap_gsea_normalized <- z_normalize(heatmap_gsea)
+heatmap_gsea_t <- t(heatmap_gsea_normalized)
+
+gsea_heatmap <- Heatmap(heatmap_gsea_t, 
+        name = "Mean Enrichment (z-score)",
+        row_title = "Clusters",
+        column_title = "SU2C cohort Hallmarks of Cancer analysis",
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_names_gp = gpar(fontsize = 5),  # Reduce size of row labels
+        column_names_gp = gpar(fontsize = 5),  # Adjust size of column labels
+        width = ncol(heatmap_gsea_t)*unit(2, "mm"), 
+        height = nrow(heatmap_gsea_t)*unit(2, "mm")
+)
+```
+
+```{r}
+# Step 12: select IG data columns for box plotting
+
+ig_data_clear <- ig_data %>%
+  dplyr::select(SampleID, IGH, IGK, IGL)
+
+clusters_column <- rownames_to_column(df, var = "SampleID")
+
+merged_ig <- left_join(ig_data_clear, clusters_column, by = "SampleID")
+
+```
+
+
+
+```{r}
+# Step 13: create box plots for IGH for C1-C4 clusters
+
+
+p1 <- ggplot(merged_ig, aes(x = clusters, y = IGH, fill = clusters)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("C1", "C2"), c("C1", "C3"), c("C1", "C4")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  scale_y_log10(limits = c(0.1, NA)) +
+  scale_fill_manual(values = cluster_colors_PCA) +
+  geom_boxplot(outlier.shape = NA) +  
+  geom_jitter(width = 0.2, size = 1, color = "black") +
+  labs(title = "Box Plot for IGH clones number by Clusters", x = "Clusters", y = "Number of clones, log-scale") +
+  theme_minimal(base_size = 10)
+  theme(plot.margin = margin(15, 15, 15, 15))
+
+
+```
+
+```{r}
+# Step 14: create box plots for IGK for C1-C4 clusters
+
+
+
+p2 <- ggplot(merged_ig, aes(x = clusters, y = IGK, fill = clusters)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("C1", "C2"), c("C1", "C3"), c("C1", "C4")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  scale_y_log10(limits = c(0.1, NA)) +
+  scale_fill_manual(values = cluster_colors_PCA) +
+  geom_boxplot(outlier.shape = NA) +  
+  geom_jitter(width = 0.2, size = 1, color = "black") +
+  labs(title = "Box Plot for IGK clones number by Clusters", x = "Clusters", y = "Number of clones, log-scale") +
+  theme_minimal(base_size = 10)
+  theme(plot.margin = margin(15, 15, 15, 15))
+
+
+
+```
+
+```{r}
+# Step 15: create box plots for IGL for C1-C4 clusters
+
+p3 <- ggplot(merged_ig, aes(x = clusters, y = IGL, fill = clusters)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("C1", "C2"), c("C1", "C3"), c("C1", "C4")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  scale_y_log10(limits = c(0.1, NA)) +
+  scale_fill_manual(values = cluster_colors_PCA) +
+  geom_boxplot(outlier.shape = NA) +  
+  geom_jitter(width = 0.2, size = 1, color = "black") +
+  labs(title = "Box Plot for IGL clones number by Clusters", x = "Clusters", y = "Number of clones, log-scale") +
+  theme_minimal(base_size = 10)
+  theme(plot.margin = margin(15, 15, 15, 15))
+
+
+
+
+```
+
+
+```{r}
+# Step 16: extract CD19, CD27, CD38 RNAseq data and import xCELL data
+
+CD_names <- c("CD19","CD27","CD38")
+
+CD_of_interest <- gene_matrix[rownames(gene_matrix) %in% CD_names, ]
+CD_interest_matrix <- data.matrix(CD_of_interest, rownames.force = NA)
+
+cd_b_cells_data <- read_tsv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/Subtypes_analysis/b_cells_surv_xcell.df.txt')
+
+cd_b_cells_data_t <- t(cd_b_cells_data)
+
+```
+```{r}
+
+# Step 17: modify data
+
+colnames(cd_b_cells_data_t) <- as.character(unlist(cd_b_cells_data_t[1, ]))
+cd_b_cells_data_t_renew <- cd_b_cells_data_t[-1, ]
+
+rows_to_remove <- c("OS", "death")
+
+cd_b_cells_data_t_renew <- cd_b_cells_data_t_renew[!row.names(cd_b_cells_data_t_renew) %in% rows_to_remove, ]
+
+cd_b_df <- as.data.frame(cd_b_cells_data_t_renew)
+```
+
+
+```{r}
+
+# Step 18: plot B cell - CD 19 correlation
+
+library(ggplot2)
+library(ggpubr)
+library(nortest)
+
+cd19_data <- as.numeric(cd_b_df["CD19", ])
+b_cells_data <- as.numeric(cd_b_df["B cell", ])
+ad.test(cd19_data)
+ad.test(b_cells_data)
+
+pearson_corr <- cor(b_cells_data, cd19_data, method = "pearson")
+
+cat("Pearson Correlation: ", pearson_corr, "\n")
+
+plot_data <- data.frame(CD19 = cd19_data, B_cell = b_cells_data)
+
+cd19_plot <- ggplot(plot_data, aes(x = CD19, y = B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("B cell and CD19 correlation") +
+  xlab("CD19 (RNA-seq)") +
+  ylab("B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(cd19_data), 
+           label.y = max(b_cells_data) * 1.1) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(cd19_data), 
+           label.y = max(b_cells_data) * 1.05) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1,
+    plot.title = element_text(size = 20, face = "bold"),  # Increase title font size
+    axis.title.x = element_text(size = 16),               # Increase x-axis title font size
+    axis.title.y = element_text(size = 16),               # Increase y-axis title font size
+    axis.text.x = element_text(size = 14),                # Increase x-axis text font size
+    axis.text.y = element_text(size = 14)           
+  )
+
+
+cd19_plot
+```
+```{r}
+
+# Step 19: plot B cell - CD 27 correlation
+
+cd27_data <- as.numeric(cd_b_df["CD27", ])
+b_cells_data <- as.numeric(cd_b_df["B cell", ])
+ad.test.test(cd27_data)
+ad.test(b_cells_data)
+
+pearson_corr <- cor(b_cells_data, cd27_data, method = "pearson")
+
+cat("Pearson Correlation: ", pearson_corr, "\n")
+
+plot_data <- data.frame(CD27 = cd27_data, B_cell = b_cells_data)
+
+cd27_plot <- ggplot(plot_data, aes(x = CD27, y = B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("B cell and CD27 correlation") +
+  xlab("CD27 (RNA-seq)") +
+  ylab("B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(cd27_data), 
+           label.y = max(b_cells_data) * 1.1) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(cd27_data), 
+           label.y = max(b_cells_data) * 1.05) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+  )
+
+
+
+```
+
+
+```{r}
+
+# Step 20: plot B cell - CD 38 correlation
+
+cd38_data <- as.numeric(cd_b_df["CD38", ])
+b_cells_data <- as.numeric(cd_b_df["B cell", ])
+ad.test(cd38_data)
+ad.test(b_cells_data)
+
+pearson_corr <- cor(b_cells_data, cd38_data, method = "pearson")
+
+cat("Pearson Correlation: ", pearson_corr, "\n")
+
+plot_data <- data.frame(CD38 = cd38_data, B_cell = b_cells_data)
+
+cd38_plot <- ggplot(plot_data, aes(x = CD38, y = B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("B cell and CD38 correlation") +
+  xlab("CD38 (RNA-seq)") +
+  ylab("B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(cd38_data), 
+           label.y = max(b_cells_data) * 1.1) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(cd38_data), 
+           label.y = max(b_cells_data) * 1.05) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+  )
+
+
+
+
+```
+
+
+```{r}
+# Step 21: plot Class-switched - CD 19 correlation
+
+cd19_data <- as.numeric(cd_b_df["CD19", ])
+cs_b_cells_data <- as.numeric(cd_b_df["Class-switched memory B cell", ])
+ad.test(cd19_data)
+ad.test(cs_b_cells_data)
+
+pearson_corr <- cor(cs_b_cells_data, cd19_data, method = "pearson")
+
+cat("Pearson Correlation: ", pearson_corr, "\n")
+
+plot_data <- data.frame(CD19 = cd19_data, Class_switched_B_cell = cs_b_cells_data)
+
+cd19_cs_plot <- ggplot(plot_data, aes(x = CD19, y = Class_switched_B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("Class-swithed B cell and CD19 correlation") +
+  xlab("CD19 (RNA-seq)") +
+  ylab("Class-switched B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(cd19_data), 
+           label.y = max(cs_b_cells_data) * 1.1) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(cd19_data), 
+           label.y = max(cs_b_cells_data) * 1.05) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+  )
+
+
+
+
+
+```
+
+
+```{r}
+# Step 22: plot Class-switched - CD 27 correlation
+
+cd27_data <- as.numeric(cd_b_df["CD27", ])
+cs_b_cells_data <- as.numeric(cd_b_df["Class-switched memory B cell", ])
+ad.test(cd27_data)
+ad.test(cs_b_cells_data)
+
+pearson_corr <- cor(cs_b_cells_data, cd27_data, method = "pearson")
+
+cat("Pearson Correlation: ", pearson_corr, "\n")
+
+plot_data <- data.frame(CD27 = cd27_data, Class_switched_B_cell = cs_b_cells_data)
+
+cd27_cs_plot <- ggplot(plot_data, aes(x = CD27, y = Class_switched_B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("Class-swithed B cell and CD27 correlation") +
+  xlab("CD27 (RNA-seq)") +
+  ylab("Class-switched B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(cd27_data), 
+           label.y = max(cs_b_cells_data) * 1.3) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(cd27_data), 
+           label.y = max(cs_b_cells_data) * 1.2) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+  )
+
+
+```
+
+
+```{r}
+# Step 23: plot Class-switched - CD 38 correlation
+
+cd38_data <- as.numeric(cd_b_df["CD38", ])
+cs_b_cells_data <- as.numeric(cd_b_df["Class-switched memory B cell", ])
+ad.test(cd38_data)
+ad.test(cs_b_cells_data)
+
+pearson_corr <- cor(cs_b_cells_data, cd38_data, method = "pearson")
+
+cat("Pearson Correlation: ", pearson_corr, "\n")
+
+plot_data <- data.frame(CD38 = cd38_data, Class_switched_B_cell = cs_b_cells_data)
+
+cd38_cs_plot <- ggplot(plot_data, aes(x = CD38, y = Class_switched_B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("Class-swithed B cell and CD38 correlation") +
+  xlab("CD38 (RNA-seq)") +
+  ylab("Class-switched B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(cd38_data), 
+           label.y = max(cs_b_cells_data) * 1.3) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(cd38_data), 
+           label.y = max(cs_b_cells_data) * 1.2) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+  )
+```
+
+```{r}
+# Step 24: Prepare B cell and Hallmarks data for correlation (IL2, IL6, IFNgamma)
+
+gsea_t <- as.data.frame(t(gsea))
+cd_b_df_t <- as.data.frame(t(cd_b_df))
+
+gsea_t$SampleID <- rownames(gsea_t)
+cd_b_df_t$SampleID <- rownames(cd_b_df_t)
+
+merged_gsea_b_cells <- merge(gsea_t, cd_b_df_t, by = "SampleID", all.x = TRUE)
+rownames(merged_gsea_b_cells) <- merged_gsea_b_cells$SampleID
+merged_gsea_b_cells$SampleID <- NULL
+merged_gsea_b_cells_clean <- na.omit(merged_gsea_b_cells)
+merged_gsea_b_cells_clean_reverse <- as.data.frame(t(merged_gsea_b_cells_clean))
+```
+
+
+```{r}
+# Step 25: B cell and IL2 correlation
+
+IL2_data <- as.numeric(merged_gsea_b_cells_clean_reverse["HALLMARK_IL2_STAT5_SIGNALING", ])
+b_cells_data <- as.numeric(merged_gsea_b_cells_clean_reverse["B cell", ])
+ad.test(IL2_data)
+ad.test(b_cells_data)
+
+spearman_corr <- cor(b_cells_data, IL2_data, method = "spearman")
+
+cat("Spearman Correlation: ", spearman_corr, "\n")
+
+plot_data <- data.frame(HALLMARK_IL2_STAT5_SIGNALING = IL2_data, B_cell = b_cells_data)
+
+IL2_b_cell_plot <- ggplot(plot_data, aes(x = HALLMARK_IL2_STAT5_SIGNALING, y = B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("B cell and IL2 pathways correlation") +
+  xlab("Pathway enrichment (z-score)") +
+  ylab("B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(IL2_data), 
+           label.y = max(b_cells_data) * 1.3) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(IL2_data), 
+           label.y = max(b_cells_data) * 1.2) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+)
+```
+
+
+```{r}
+# Step 26: B cell and IL6 correlation
+
+IL6_data <- as.numeric(merged_gsea_b_cells_clean_reverse["HALLMARK_IL6_JAK_STAT3_SIGNALING", ])
+b_cells_data <- as.numeric(merged_gsea_b_cells_clean_reverse["B cell", ])
+ad.test(IL6_data)
+ad.test(b_cells_data)
+
+spearman_corr <- cor(b_cells_data, IL6_data, method = "spearman")
+
+cat("Spearman Correlation: ", spearman_corr, "\n")
+
+plot_data <- data.frame(HALLMARK_IL6_JAK_STAT3_SIGNALING = IL6_data, B_cell = b_cells_data)
+
+IL6_b_cell_plot <- ggplot(plot_data, aes(x = HALLMARK_IL6_JAK_STAT3_SIGNALING, y = B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("B cell and IL6 pathways correlation") +
+  xlab("Pathway enrichment (z-score)") +
+  ylab("B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(IL6_data), 
+           label.y = max(b_cells_data) * 1.3) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(IL6_data), 
+           label.y = max(b_cells_data) * 1.2) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+)
+```
+
+```{r}
+# Step 27: B cell and IFNgamma correlation
+
+IFNg_data <- as.numeric(merged_gsea_b_cells_clean_reverse["HALLMARK_INTERFERON_GAMMA_RESPONSE", ])
+b_cells_data <- as.numeric(merged_gsea_b_cells_clean_reverse["B cell", ])
+ad.test(IFNg_data)
+ad.test(b_cells_data)
+
+spearman_corr <- cor(b_cells_data, IFNg_data, method = "spearman")
+
+cat("Spearman Correlation: ", spearman_corr, "\n")
+
+plot_data <- data.frame(HALLMARK_INTERFERON_GAMMA_RESPONSE = IFNg_data, B_cell = b_cells_data)
+
+IFNg_b_cell_plot <- ggplot(plot_data, aes(x = HALLMARK_INTERFERON_GAMMA_RESPONSE, y = B_cell)) +
+  geom_point(color = 'gray46', size = 2) +
+  geom_smooth(method = "lm", col = "blue", se = TRUE) +
+  ggtitle("B cell and IFN-gamma pathways correlation") +
+  xlab("Pathway enrichment (z-score)") +
+  ylab("B Cells (prop)") +
+  stat_cor(method = "pearson", 
+           aes(label = ..r.label..), 
+           label.x = min(IFNg_data), 
+           label.y = max(b_cells_data) * 1.3) +  # Adjust y position to fit label
+  stat_cor(method = "pearson", 
+           aes(label = ..p.label..), 
+           label.x = min(IFNg_data), 
+           label.y = max(b_cells_data) * 1.2) +  # Adjust y position to fit label
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "white"),    
+    panel.grid.minor = element_line(color = "white"),
+    aspect.ratio = 1 
+)
+```
+

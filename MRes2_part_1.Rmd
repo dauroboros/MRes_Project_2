@@ -1,0 +1,471 @@
+
+# This is part 1 of Project 2
+
+# This file contains code to create the following plots: Heatmap with xCELL results for all samples + cell subtypes based on CD biomarkers expression + overall survival data; Kaplan-Meier plots for B cell subtypes survival analysis (high and low abundances); Cox proportional Hazards Model for multivariative analysis of B cell subtypes and overall survival; Group Comparisons for Class-switched and pro B cells across all tumor sites and molecular clusters;
+
+
+
+```{r}
+# Step 1: import libraries for heatmap
+
+
+library(ComplexHeatmap)
+library(dplyr)
+library(tidyverse)
+library(survival)
+library(survminer)
+library(colorRamp2)
+```
+
+### Heatmap of cell-types in SU2C - tumour biopsies
+
+```{r}
+# Step 2: Import B cells data for heatmap and modify
+
+
+corr.df <- read_tsv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/XCELL_correlation_analysis/b_cells_surv_xcell.df.txt')
+
+pro_b_cell_data <- read_tsv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/SU2C_BCR_clinical_relevance/SU2C.cell.prop.df.txt')
+
+pro_b_cell_data <- as.data.frame(pro_b_cell_data)
+
+rownames(pro_b_cell_data) <- pro_b_cell_data$cell_type
+pro_b_cell_data$cell_type <- NULL
+
+```
+
+```{r}
+
+# Step 3: additional data modifications and row selections
+
+common_columns <- intersect(names(RNA.seq.df), names(pro_b_cell_data))
+RNA.seq.df_common <- RNA.seq.df[, common_columns, drop = FALSE]
+pro_b_cell_data_common <- pro_b_cell_data[, common_columns, drop = FALSE]
+
+df1_non_common_columns <- setdiff(names(RNA.seq.df), common_columns)
+df2_non_common_columns <- setdiff(names(pro_b_cell_data), common_columns)
+
+corr.df_modified <- corr.df[!rownames(corr.df) %in% df2_non_common_columns, , drop = FALSE]
+
+```
+
+
+
+
+```{r celltype-heatmap,results="hide", fig.align='center', fig.height=6, fig.width=10,fig.cap="This heatmap represents cell-types in SU2C samples at the tumour site." }
+
+# Step 4: create a final dataframe with a specific columns 
+
+cell.type.cols = list('CD19'=colorRamp2(c(-1:5), hcl_palette = "Reds",reverse = T),
+                      'CD24'=colorRamp2(c(-1:5), hcl_palette = "Reds",reverse = T),
+                      'CD27'=colorRamp2(c(-1:5), hcl_palette = "Reds",reverse = T),
+                      'CD38'=colorRamp2(c(-1:5), hcl_palette = "Reds",reverse = T),
+                      'OS'=colorRamp2(c(0:10), hcl_palette = "heat",reverse = T))
+
+tmp.df <- na.omit(corr.df_modified)
+colAnnot.df = columnAnnotation(
+    'OS'=(corr.df_modified$OS),
+    'CD19'=scale(corr.df_modified$CD19),
+    'CD27'=scale(corr.df_modified$CD27),
+    'CD38'=scale(corr.df_modified$CD38),
+    annotation_height=unit(c(rep(5,3)), "cm"),
+    col=cell.type.cols,show_legend=T,border=F,na_col='white',annotation_legend_param = list(direction='horizontal'),
+    annotation_name_gp= gpar(fontsize = 10,fontface='bold'))
+ht_opt$COLUMN_ANNO_PADDING = unit(0.1, "lines")
+rownames(corr.df_modified) <- corr.df_modified$Sample.ID
+
+RNA.seq.df <- as.data.frame(t(corr.df_modified[-c(1:4,10:11)]))
+colnames(RNA.seq.df) <- corr.df_modified$Sample.ID
+# col.ord <- names(sort(colSums(t(scale(t(RNA.seq.df)))[c("CD4 Tcell","CD8 Tcell","Tregs","T cell (other)"),]),decreasing = T))
+col.ord <- arrange(tmp.df,CD19)$Sample.ID
+```
+
+
+```{r}
+
+# Step 5: sligthly clean the data to prepare for proper visualization and naming
+
+full_data_abundance <- rbind(RNA.seq.df, pro_b_cell_data_common)
+full_data_abundance <- as.matrix(full_data_abundance)
+selected_rownames <- c("B cell", "B cell naive", "B cell plasma", "Class-switched memory B cell","B cell memory","pro B-cells")
+
+full_data_abundance_final <- full_data_abundance[rownames(full_data_abundance) %in% selected_rownames, , drop = FALSE]
+
+old_name <- "Class-switched memory B cell"
+rownames(full_data_abundance_final)[rownames(full_data_abundance_final) == old_name] <- "Class-switched B cell"
+
+```
+
+
+```{r celltype-heatmap,results="hide", fig.align='center', fig.height=6, fig.width=10,fig.cap="This heatmap represents cell-types in SU2C samples at the tumour site." }
+
+# Step 6: draw a heatmap to visualize all samples CD biomarkers expression, B cells abundancies and OS
+
+
+HeatMapFull <- draw(Heatmap(matrix = full_data_abundance_final,
+             col = colorRamp2(c(0:5), hcl_palette = "Oslo",reverse = F),
+             name = 'Normalized cell prop',border = T,heatmap_legend_param = list(direction='vertical'),
+             na_col ='white',
+             column_order = col.ord,cluster_columns = F,
+             row_title = "Cell proportion",
+             show_column_dend = T,
+             row_dend_reorder = F,cluster_rows = F,row_title_side = 'left',
+             row_dend_width = unit(10,'mm'),row_dend_side = 'left',
+             rect_gp = gpar(col = "white", lwd = 0),show_heatmap_legend = T,show_parent_dend_line = T,
+             show_row_dend = F,show_column_names = F,
+             show_row_names = T,cluster_row_slices = T,
+             width = nrow((full_data_abundance_final))*unit(1.7, "cm"),
+             height = ncol((full_data_abundance_final))*unit(0.2, "mm"),column_title = 'Tumour samples',column_title_side = 'bottom',
+             row_names_gp = gpar(fontsize=10,fontface='bold'),cluster_column_slices = F,column_dend_reorder = T,column_title_gp = gpar(fontsize=8,fontface='bold'),
+             clustering_distance_rows ="pearson",row_title_gp = gpar(fontsize=8,fontface='bold'),
+             top_annotation  = colAnnot.df
+),heatmap_legend_side='left',annotation_legend_side='bottom')
+
+```
+
+
+```{r}
+# Step 7: Import data for Kaplan-Meier survival analysis
+
+
+surv_b_cells <- read_csv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/B_cells_subtypes_survival.csv')
+```
+
+```{r}
+
+surv_b_cells <- surv_b_cells %>% dplyr::rename(B_cells = `B-cells`, Class_switched_memory_B_cells = `Class-switched memory B-cells`, Memory_B_cells = `Memory B-cells`, naive_B_cells= `naive B-cells`, pro_B_cells = `pro B-cells` )
+
+surv_b_cells$OS_days <- surv_b_cells$OS * 365
+
+```
+
+
+
+```{r}
+# Step 8: create Kaplan-Meier Curves for each type of B cells separately
+# Part 1: B_cells
+
+surv_object <- Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death)
+
+fit <- survfit(surv_object ~ B_cells, data = surv_b_cells)
+
+kaplan_b_cells <- ggsurvplot(fit, data = surv_b_cells, 
+             pval = TRUE, 
+             conf.int = TRUE, 
+             risk.table = TRUE,
+             ggtheme = theme_minimal(),
+             xlab = "",
+             ylab = "")
+
+summary(survfit(Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death) ~ surv_b_cells$`B_cells`), times = round(c(365 / 2), digits = 0))
+```
+
+
+```{r}
+
+# Step 8: create Kaplan-Meier Curves for each type of B cells separately
+# Part 2: Class_switched_memory_B_cells
+
+surv_object <- Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death)
+
+fit <- survfit(surv_object ~ Class_switched_memory_B_cells, data = surv_b_cells)
+
+kaplan_class_b_cells <- ggsurvplot(fit, data = surv_b_cells, 
+             pval = TRUE, 
+             conf.int = TRUE, 
+             risk.table = TRUE,
+             ggtheme = theme_minimal())
+
+
+summary(survfit(Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death) ~ surv_b_cells$`Class_switched_memory_B_cells`), times = round(c(365 / 2), digits = 0))
+```
+```{r}
+# Step 8: create Kaplan-Meier Curves for each type of B cells separately
+# Part 3: Memory_B_cells
+
+surv_object <- Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death)
+
+fit <- survfit(surv_object ~ Memory_B_cells, data = surv_b_cells)
+
+kaplan_memory_b_cells <- ggsurvplot(fit, data = surv_b_cells, 
+             pval = TRUE, 
+             conf.int = TRUE, 
+             risk.table = TRUE,
+             ggtheme = theme_minimal())
+
+summary(survfit(Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death) ~ surv_b_cells$`Memory_B_cells`), times = round(c(365 / 2), digits = 0))
+```
+
+
+```{r}
+
+# Step 8: create Kaplan-Meier Curves for each type of B cells separately
+# Part 4: naive_B_cells
+
+surv_object <- Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death)
+
+fit <- survfit(surv_object ~ naive_B_cells, data = surv_b_cells)
+
+kaplan_naive_b_cells <- ggsurvplot(fit, data = surv_b_cells, 
+             pval = TRUE, 
+             conf.int = TRUE, 
+             risk.table = TRUE,
+             ggtheme = theme_minimal())
+
+summary(survfit(Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death) ~ surv_b_cells$`naive_B_cells`), times = round(c(365 / 2), digits = 0))
+```
+
+```{r}
+
+# Step 8: create Kaplan-Meier Curves for each type of B cells separately
+# Part 5: pro_B_cells
+
+surv_object <- Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death)
+
+fit <- survfit(surv_object ~ pro_B_cells, data = surv_b_cells)
+
+kaplan_pro_b_cells <- ggsurvplot(fit, data = surv_b_cells, 
+             pval = TRUE, 
+             conf.int = TRUE, 
+             risk.table = TRUE,
+             ggtheme = theme_minimal())
+
+summary(survfit(Surv(time = surv_b_cells$OS_days, event = surv_b_cells$death) ~ surv_b_cells$`pro_B_cells`), times = round(c(365 / 2), digits = 0))
+
+```
+
+
+```{r}
+
+# Step 9: Cox Proportional Hazard Model - multivariative analysis on B cell subtypes abundance effects on OS
+
+surv_b_cells_no_id <- surv_b_cells[ , -which(names(surv_b_cells) == "cell_type")]
+surv_object <- Surv(time = surv_b_cells_no_id$OS, event = surv_b_cells_no_id$death)
+cox_model <- coxph(surv_object ~ B_cells + naive_B_cells + Class_switched_memory_B_cells + pro_B_cells + Memory_B_cells, data = surv_b_cells_no_id)
+summary(cox_model)
+
+forest_plot <- ggforest(cox_model, data = surv_b_cells_no_id,
+         main = "Cox Proportional Hazards Model (multivariative) for B cell subtypes in SU2C cohort",
+         cpositions = c(0.01, 0.22, 5.4),
+         fontsize = 0.8,
+         refLabel = 'reference')
+
+ggsave("forest_plot.png", plot = forest_plot, width = 12, height = 6)
+
+
+```
+
+```{r}
+
+# Step 10: load, prepare, merge and transform data for B cell abundance group comparisons across localizations and clusters
+
+cd_b_cells_data_for_distribution <- cd_b_cells_data
+cd_b_cells_data_for_distribution$Sample.ID <- paste0(cd_b_cells_data_for_distribution$Sample.ID, "_report")
+
+xcell_abundance_distribution_local <- merge(cd_b_cells_data_for_distribution, clin_data_important, by.x = "Sample.ID", by.y = "POLY_A", all.x = TRUE )
+
+xcell_abundance_distribution_full <- merge(xcell_abundance_distribution_local, clusters_df, by.x = "Sample.ID", by.y = "Sample_ID", all.x = TRUE )
+
+xcell_abundance_distribution_full <- xcell_abundance_distribution_full %>% dplyr::rename(B_cells = `B cell`, Class_switched_memory_B_cells = `Class-switched memory B cell`, Memory_B_cells = `B cell memory`, naive_B_cells= `B cell naive`, pro_B_cells = `B cell plasma` )
+
+xcell_abundance_distribution_full$clusters <- factor(xcell_abundance_distribution_full$clusters, levels = c("1", "2", "3", "4"))
+
+xcell_abundance_distribution_full <- na.omit(xcell_abundance_distribution_full)
+
+
+min_value_cs_b <- min(xcell_abundance_distribution_full$Class_switched_memory_B_cells)
+xcell_abundance_distribution_full$Class_switched_memory_B_cells_shifted <- xcell_abundance_distribution_full$Class_switched_memory_B_cells + abs(min_value_cs_b) + 1e-10 
+
+
+min_value_pro_b <- min(xcell_abundance_distribution_full$pro_B_cells)
+xcell_abundance_distribution_full$pro_B_cells_shifted <- xcell_abundance_distribution_full$pro_B_cells + abs(min_value_pro_b) + 1e-10 
+
+
+custom_colors_localization <- c("Lymph_node" = "#1f77b4",  # Blue
+                   "Bone" = "#ff7f0e",        # Orange
+                   "Liver" = "#2ca02c",       # Green
+                   "Prostate" = "#d62728",    # Red
+                   "Other" = "#9467bd")       # Purple
+
+custom_colors_clusters <- c("#1f77b4", "#ff7f0e", 'darkgreen','purple')
+
+```
+
+```{r}
+
+# Step 11: Tumor site and cluster comparison with statistics - Class-switched B cells
+
+xcell_localization_cs_b_cell <- ggplot(xcell_abundance_distribution_full, aes(x = Biopsy_Site, y = Class_switched_memory_B_cells_shifted, fill = Biopsy_Site)) +
+  geom_boxplot() +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("Lymph_node", "Bone"), c("Lymph_node", "Liver"), c("Lymph_node", "Prostate"), c("Lymph_node", "Other")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  labs(title = "Class-switched B cells abundance across metastasis localization",
+       x = "Localization",
+       y = "Relative Abundance",
+       fill = "Metastasis Localization") +
+  theme(
+  plot.title = element_text(face = "bold"),
+  axis.title.x = element_text(face = "bold"),
+  axis.title.y = element_text(face = "bold"),
+  legend.title = element_text(face = "bold"),
+  axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = custom_colors_localization)
+
+
+wilcox_results_cs_b_cells_localization <- compare_means(Class_switched_memory_B_cells_shifted ~ Biopsy_Site, data = xcell_abundance_distribution_full,
+                                method = "wilcox.test",
+                               comparisons = list(c("Lymph_node", "Bone"), c("Lymph_node", "Liver"), c("Lymph_node", "Prostate"), c("Lymph_node", "Other")))
+
+
+kruskal_results_cs_b_cells_localization <- compare_means(Class_switched_memory_B_cells_shifted ~ Biopsy_Site, data = xcell_abundance_distribution_full, method = "kruskal.test")
+
+
+descriptive_stats_cs_b_cells_localization <- xcell_abundance_distribution_full %>%
+  group_by(Biopsy_Site) %>%
+  summarise(
+    count = n(),
+    mean = mean(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    median = median(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    sd = sd(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    min = min(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    max = max(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    IQR = IQR(Class_switched_memory_B_cells_shifted, na.rm = TRUE)
+  )
+
+
+
+xcell_clusters_cs_b_cell <- ggplot(xcell_abundance_distribution_full, aes(x = clusters, y = Class_switched_memory_B_cells_shifted, fill = clusters)) +
+  geom_boxplot() +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("1", "2"), c("1", "3"), c("1", "4")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  labs(title = "Class-switched B cells abundance across molecular clusters",
+       x = "Clusters",
+       y = "Relative Abundance",
+       fill = "Clusters") +
+  theme(
+  plot.title = element_text(face = "bold"),
+  axis.title.x = element_text(face = "bold"),
+  axis.title.y = element_text(face = "bold"),
+  legend.title = element_text(face = "bold"),
+  axis.text.x = element_text(angle = 45, hjust = 1)) +
+scale_fill_manual(values = custom_colors_clusters)
+
+wilcox_results_cs_b_cells_clusters <- compare_means(Class_switched_memory_B_cells_shifted ~ clusters, data = xcell_abundance_distribution_full,
+                                method = "wilcox.test",
+                                comparisons = list(c("1", "2"), c("1", "3"), c("1", "4")))
+
+
+kruskal_results_cs_b_cells_clusters <- compare_means(Class_switched_memory_B_cells_shifted ~ clusters, data = xcell_abundance_distribution_full, method = "kruskal.test")
+
+
+descriptive_stats_cs_b_cells_clusters <- xcell_abundance_distribution_full %>%
+  group_by(clusters) %>%
+  summarise(
+    count = n(),
+    mean = mean(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    median = median(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    sd = sd(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    min = min(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    max = max(Class_switched_memory_B_cells_shifted, na.rm = TRUE),
+    IQR = IQR(Class_switched_memory_B_cells_shifted, na.rm = TRUE)
+  )
+
+```
+
+```{r}
+
+# Step 12: Tumor site and cluster comparison with statistics - pro B cells
+
+
+xcell_localization_pro_b_cell <- ggplot(xcell_abundance_distribution_full, aes(x = Biopsy_Site, y = pro_B_cells_shifted, fill = Biopsy_Site)) +
+  geom_boxplot() +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("Lymph_node", "Bone"), c("Lymph_node", "Liver"), c("Lymph_node", "Prostate"), c("Lymph_node", "Other")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  labs(title = "Pro B cells abundance across metastasis localization",
+       x = "Localization",
+       y = "Relative Abundance",
+       fill = "Metastasis Localization") +
+  theme(
+  plot.title = element_text(face = "bold"),
+  axis.title.x = element_text(face = "bold"),
+  axis.title.y = element_text(face = "bold"),
+  legend.title = element_text(face = "bold"),
+  axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_fill_manual(values = custom_colors_localization)
+
+
+
+
+wilcox_results_pro_b_cells_localization <- compare_means(pro_B_cells_shifted ~ Biopsy_Site, data = xcell_abundance_distribution_full,
+                                method = "wilcox.test",
+                               comparisons = list(c("Lymph_node", "Bone"), c("Lymph_node", "Liver"), c("Lymph_node", "Prostate"), c("Lymph_node", "Other")))
+
+
+kruskal_results_pro_b_cells_localization <- compare_means(pro_B_cells_shifted ~ Biopsy_Site, data = xcell_abundance_distribution_full, method = "kruskal.test")
+
+
+descriptive_stats_pro_b_cells_localization <- xcell_abundance_distribution_full %>%
+  group_by(Biopsy_Site) %>%
+  summarise(
+    count = n(),
+    mean = mean(pro_B_cells_shifted, na.rm = TRUE),
+    median = median(pro_B_cells_shifted, na.rm = TRUE),
+    sd = sd(pro_B_cells_shifted, na.rm = TRUE),
+    min = min(pro_B_cells_shifted, na.rm = TRUE),
+    max = max(pro_B_cells_shifted, na.rm = TRUE),
+    IQR = IQR(pro_B_cells_shifted, na.rm = TRUE)
+  )
+
+
+
+xcell_clusters_pro_b_cell <- ggplot(xcell_abundance_distribution_full, aes(x = clusters, y = pro_B_cells_shifted, fill = clusters)) +
+  geom_boxplot() +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("1", "2"), c("1", "3"), c("1", "4")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  labs(title = "Pro B cells abundance across molecular clusters",
+       x = "Clusters",
+       y = "Relative Abundance",
+       fill = "Clusters") +
+  theme(
+  plot.title = element_text(face = "bold"),
+  axis.title.x = element_text(face = "bold"),
+  axis.title.y = element_text(face = "bold"),
+  legend.title = element_text(face = "bold"),
+  axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_fill_manual(values = custom_colors_clusters)
+
+
+wilcox_results_pro_b_cells_clusters <- compare_means(pro_B_cells_shifted ~ clusters, data = xcell_abundance_distribution_full,
+                                method = "wilcox.test",
+                                comparisons = list(c("1", "2"), c("1", "3"), c("1", "4")))
+
+kruskal_results_pro_b_cells_clusters <- compare_means(pro_B_cells_shifted ~ clusters, data = xcell_abundance_distribution_full, method = "kruskal.test")
+
+
+descriptive_stats_pro_b_cells_clusters <- xcell_abundance_distribution_full %>%
+  group_by(clusters) %>%
+  summarise(
+    count = n(),
+    mean = mean(pro_B_cells_shifted, na.rm = TRUE),
+    median = median(pro_B_cells_shifted, na.rm = TRUE),
+    sd = sd(pro_B_cells_shifted, na.rm = TRUE),
+    min = min(pro_B_cells_shifted, na.rm = TRUE),
+    max = max(pro_B_cells_shifted, na.rm = TRUE),
+    IQR = IQR(pro_B_cells_shifted, na.rm = TRUE)
+  )
+
+
+```
+

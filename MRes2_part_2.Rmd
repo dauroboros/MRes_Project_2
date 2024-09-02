@@ -1,0 +1,434 @@
+# This is Part 2 of the Project 2
+# this is the Immunarch analysis on SU2C cohort
+# this analysis includes several steps: subset clones into variable IG genes from data, plot CDR3 length among samples, calculate and visualise number of clonotypes, IGHV group comparison across tumor sites and clusters; diversity estimation across tumor sites and clusters; 
+
+```{r}
+# Step 1: import libraries
+
+library(immunarch)
+library(dplyr)
+library(stringr)
+library(UpSetR)
+```
+
+```{r}
+# Step 2: import data
+
+setwd('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C')
+
+path_file <- ('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/TCR_SU2C')
+
+immdata <- repLoad(path_file)
+
+```
+
+
+```{r}
+#Step 3: import advanced clinical data for further analysis (metastasis sites, treatment)
+
+clin_data <- read_tsv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/BCR_SU2C/SU2C_PolyA165toSU2Cid.txt')
+
+clin_data$POLY_A <- paste0(clin_data$POLY_A, "_report")
+clin_data_important <- clin_data %>% dplyr::select(Biopsy_Site, BIOPSY_DETAIL, POLY_A)
+
+
+surv_data <- read.csv('/Users/d/Desktop/Life/UK/Imperial/MRes/Assignments/Project_2/SU2C_BCR_clinical_relevance/heatmap_data.csv')
+
+```
+
+```{r}
+# Step 4: Clean data and prepare to further analysis
+
+clin_data_important <- clin_data_important %>% mutate(Biopsy_Site = if_else(Biopsy_Site == "TURP", "Prostate", Biopsy_Site))
+
+clin_data_important <- clin_data_important %>% mutate(Biopsy_Site = if_else(Biopsy_Site %in% c("Liver", "Lymph_node", "Bone", "Prostate"), Biopsy_Site, "Other"))
+
+clin_data_important <- na.omit(clin_data_important)
+
+unique_values_clin_data_important <- clin_data_important %>% distinct(clin_data_important$Biopsy_Site)
+
+```
+
+
+```{r}
+# Step 5: Clean data and prepare to further analysis 2
+
+clusters_df <- as.data.frame(clusters)
+clusters_df$Sample_ID <- rownames(clusters_df)
+rownames(clusters_df) <- NULL
+clusters_df$Sample_ID <- paste0(clusters_df$Sample_ID, "_report")
+
+
+```
+
+```{r}
+# Step 6: add metadata about tissue localization and clusters
+
+immdata$meta <- merge(immdata$meta, clin_data_important, by.x = "Sample", by.y = "POLY_A", all.x = TRUE)
+immdata$meta <- merge(immdata$meta, clusters_df, by.x = "Sample", by.y = "Sample_ID", all.x = TRUE)
+
+```
+
+
+
+```{r}
+# Step 7: filter only IG-containing subpopulation (BCR clones)
+
+top(immdata$data[[1]])
+
+ig_data <- repFilter(immdata, .method = "by.clonotype", .query = list(V.name = include("IGH") , CDR3.aa=exclude('partial','noncoding','NA','out_of_frame')), .match="startswith")
+
+
+top(ig_data$data[[1]])
+
+
+```
+
+```{r}
+# Step 8: CDR3 length exploration, clonotype abundance in each sample, number of unique clonotypes in each sample
+
+exp_len <- repExplore(ig_data$data, .method = "len", .col = "aa")
+
+exp_cnt <- repExplore(ig_data$data, .method = "count")
+exp_vol <- repExplore(ig_data$data, .method = "volume")
+
+p1 <- vis(exp_len)
+p2 <- vis(exp_cnt)
+p3 <- vis(exp_vol)
+
+
+```
+
+```{r}
+# Step 9: obtain absolute abundance of each IGHV clone subtype across samples and create separate columns for each IGHV subtype for further work
+
+ig_data_ighd <- geneUsage(ig_data$data)
+
+ig_data_renew <- ig_data_ighd %>%
+  mutate(IG_TYPE = case_when(
+    grepl("^IGHV1", Names) ~ "IGHV1",
+    grepl("^IGHV2", Names) ~ "IGHV2",
+    grepl("^IGHV3", Names) ~ "IGHV3",
+    grepl("^IGHV4", Names) ~ "IGHV4",
+    grepl("^IGHV5", Names) ~ "IGHV5",
+    grepl("^IGHV6", Names) ~ "IGHV6",
+    grepl("^IGHV7", Names) ~ "IGHV7",
+    TRUE ~ NA_character_
+  ))
+
+```
+
+
+```{r}
+# Step 10: group and summarize IG_TYPE values for all samples
+
+ig_data_sum <- ig_data_renew %>%
+  group_by(IG_TYPE) %>%
+  summarize(across(starts_with("SI"), sum, na.rm = TRUE), .groups = 'drop')
+```
+
+```{r}
+# Step 11: calculate relative proportion of each IGHV subtypes across all samples
+
+total_sum <- colSums(ig_data_sum %>% dplyr::select(-IG_TYPE))
+
+df_relative <- ig_data_sum %>%
+  rowwise() %>%
+  mutate(across(-IG_TYPE, ~ .x / sum(c_across(-IG_TYPE)), .names = "relative_{col}")) %>%
+  ungroup()
+
+ig_data_sum_relative <- df_relative %>%
+  dplyr::select(IG_TYPE, starts_with("relative_"))
+
+colnames(ig_data_sum_relative) <- c("IGHV", sub("relative_", "", colnames(ig_data_sum_relative)[-1]))
+```
+
+
+```{r}
+
+# Step 12: perform min-max normalization
+
+min_max_normalize <- function(x) {
+  (x - min(x)) / (max(x) - min(x))
+}
+
+ig_data_sum_relative_normalized <- ig_data_sum_relative %>%
+  mutate(across(where(is.numeric), min_max_normalize))
+
+```
+
+```{r}
+# Step 13: convert data for futher manipulation
+
+
+ig_data_long <- ig_data_sum_relative_normalized %>%
+  pivot_longer(
+    -IGHV,  # Assuming 'IGHV' is the column that now acts as row names
+    names_to = "SampleID",
+    values_to = "ClonalCount"
+  )
+
+```
+
+```{r}
+
+# Step 14: additionally convert data for further manipulation
+
+
+ig_data_long_clusters <- merge(ig_data_long, clusters_df, by.x = "SampleID", by.y = "Sample_ID", all.x = TRUE)
+ig_data_long_full <- merge(ig_data_long_clusters, clin_data_important, by.x = "SampleID", by.y = "POLY_A", all.x = TRUE)
+
+ig_data_long_full$clusters <- as.factor(ig_data_long_full$clusters)
+
+ig_data_long_full_cluster <- na.omit(ig_data_long_full)
+```
+
+
+```{r}
+
+# Step 15: perform IGHV subtypes comparison across samples by tumor site
+
+
+IGHV_localization_comparison <- ggplot(ig_data_long_full_cluster, aes(x = IGHV, y = ClonalCount, fill = Biopsy_Site)) +
+  geom_boxplot() +
+  labs(title = "Relative Abundance by IGHV Subtype across different metatastasis Localizations", x = "IGHV Subtype", y = "Normalized Relative Abundance") +
+  theme_minimal() +
+  scale_fill_manual(values = custom_colors_localization) +
+  stat_compare_means(aes(group = Biopsy_Site), method = "kruskal.test", label = "p.format", 
+                     vjust = -0.5, label.y = max(ig_data_long_full_cluster$ClonalCount) * 1.05)
+
+summary_stats_localization <- ig_data_long_full_cluster %>%
+  group_by(IGHV_subtype = IGHV, Tissue = Biopsy_Site) %>%
+  summarize(mean_abundance = mean(ClonalCount, na.rm = TRUE),
+            median_abundance = median(ClonalCount, na.rm = TRUE),
+            sd_abundance = sd(ClonalCount, na.rm = TRUE),
+            .groups = 'drop')
+
+kruskal_results_localization <- ig_data_long_full_cluster %>%
+  group_by(IGHV) %>%
+  summarise(p_value = kruskal.test(ClonalCount ~ Biopsy_Site)$p.value)
+
+
+```
+
+
+
+```{r}
+
+# Step 16: perform IGHV subtypes comparison across samples by molecular clusters
+
+
+IGHV_clusters_comparison <- ggplot(ig_data_long_full_cluster, aes(x = IGHV, y = ClonalCount, fill = clusters)) +
+  geom_boxplot() +
+  labs(title = "Relative Abundance by IGHV Subtype across C1-C4 Clusters", x = "IGHV Subtype", y = "Normalized Relative Abundance") +
+  theme_minimal() +
+  scale_fill_manual(values = custom_colors_clusters) +
+  stat_compare_means(aes(group = clusters), method = "kruskal.test", label = "p.format", 
+                     vjust = -0.5, label.y = max(ig_data_long_full_cluster$ClonalCount) * 1.05)
+
+summary_stats_clusters <- ig_data_long_full_cluster %>%
+  group_by(IGHV_subtype = IGHV, Cluster = clusters) %>%
+  summarize(mean_abundance = mean(ClonalCount, na.rm = TRUE),
+            median_abundance = median(ClonalCount, na.rm = TRUE),
+            sd_abundance = sd(ClonalCount, na.rm = TRUE),
+            .groups = 'drop')
+
+kruskal_results_clusters <- ig_data_long_full_cluster %>%
+  group_by(IGHV) %>%
+  summarise(p_value = kruskal.test(ClonalCount ~ clusters)$p.value)
+
+```
+
+
+
+```{r}
+
+# Step 17: create separate datasets for each localization and calculate Gini coefficient
+
+subset_immdata_bone <- repFilter(ig_data, .method = "by.meta", .query = list(Biopsy_Site = include("Bone")))$data
+
+subset_immdata_liver <- repFilter(ig_data, .method = "by.meta", .query = list(Biopsy_Site = include("Liver")))$data
+
+subset_immdata_lymph <- repFilter(ig_data, .method = "by.meta", .query = list(Biopsy_Site = include("Lymph_node")))$data
+
+subset_immdata_prostate <- repFilter(ig_data, .method = "by.meta", .query = list(Biopsy_Site = include("Prostate")))$data
+
+subset_immdata_other <- repFilter(ig_data, .method = "by.meta", .query = list(Biopsy_Site = include("Other")))$data
+
+div_gini_bone <- repDiversity(subset_immdata_bone, "gini")
+div_gini_liver <- repDiversity(subset_immdata_liver, "gini")
+div_gini_lymph <- repDiversity(subset_immdata_lymph, "gini")
+div_gini_prostate <- repDiversity(subset_immdata_prostate, "gini")
+div_gini_other <- repDiversity(subset_immdata_other, "gini")
+
+```
+
+```{r}
+# Step 18: merge all Gini coefficient files for further plotting
+
+vectors_gini <- list(div_gini_lymph, div_gini_bone, div_gini_liver, div_gini_prostate, div_gini_other)
+tissues_gini <- c("Lymph_node", "Bone", "Liver", "Prostate", "Other")
+
+gini_list <- list()
+
+for (i in seq_along(vectors_gini)) {
+  df <- data.frame(
+    A = rownames(vectors_gini[[i]]),
+    Gini_value = as.numeric(vectors_gini[[i]]),
+    Tissue = tissues_gini[i]
+  )
+  gini_list[[i]] <- df
+}
+
+gini_combined <- do.call(rbind, gini_list)
+gini_combined$Tissue <- factor(gini_combined$Tissue, levels = c("Lymph_node", "Bone", "Liver", "Prostate", "Other"))
+
+
+```
+
+
+```{r}
+
+# Step 19: generate box plots to compare Gini coefficient among different localizations
+
+gini_plots <- ggplot(gini_combined, aes(x = Tissue, y = Gini_value, fill = Tissue)) +
+  geom_boxplot() +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("Lymph_node", "Bone"), c("Lymph_node", "Liver"), c("Lymph_node", "Prostate"), c("Lymph_node", "Other")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  labs(title = "Clonal Diversity Estimation across metastasis localization",
+       x = "Localization",
+       y = "Gini coefficient",
+       fill = "Metastasis Localization") +
+  theme(
+  axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = custom_colors_localization)
+
+
+
+
+```
+
+```{r}
+
+# Step 20: calculate statistics used in plot (localization)
+
+wilcox_results <- compare_means(Gini_value ~ Tissue, data = gini_combined,
+                                method = "wilcox.test",
+                                comparisons = list(c("Lymph_node", "Bone"), c("Lymph_node", "Liver"), c("Lymph_node", "Prostate"), c("Lymph_node", "Other")))
+
+kruskal_results <- compare_means(Gini_value ~ Tissue, data = gini_combined, method = "kruskal.test")
+
+
+descriptive_stats <- gini_combined %>%
+  group_by(Tissue) %>%
+  summarise(
+    count = n(),
+    mean = mean(Gini_value, na.rm = TRUE),
+    median = median(Gini_value, na.rm = TRUE),
+    sd = sd(Gini_value, na.rm = TRUE),
+    min = min(Gini_value, na.rm = TRUE),
+    max = max(Gini_value, na.rm = TRUE),
+    IQR = IQR(Gini_value, na.rm = TRUE)
+  )
+
+print(descriptive_stats)
+
+
+
+```
+
+
+
+```{r}
+# Step 21: create separate datasets for each cluster and calculate Gini coefficient
+
+subset_immdata_c1 <- repFilter(ig_data, .method = "by.meta", .query = list(clusters = include("1")))$data
+
+subset_immdata_c2 <- repFilter(ig_data, .method = "by.meta", .query = list(clusters = include("2")))$data
+
+subset_immdata_c3 <- repFilter(ig_data, .method = "by.meta", .query = list(clusters = include("3")))$data
+
+subset_immdata_c4 <- repFilter(ig_data, .method = "by.meta", .query = list(clusters = include("4")))$data
+
+
+div_gini_c1 <- repDiversity(subset_immdata_c1, "gini")
+div_gini_c2 <- repDiversity(subset_immdata_c2, "gini")
+div_gini_c3 <- repDiversity(subset_immdata_c3, "gini")
+div_gini_c4 <- repDiversity(subset_immdata_c4, "gini")
+
+```
+
+```{r}
+# Step 22: merge all Gini coefficient files for further plotting
+
+vectors_gini_clusters <- list(div_gini_c1, div_gini_c2, div_gini_c3, div_gini_c4)
+clusters_gini <- c("C1", "C2", "C3", "C4")
+
+gini_list_clusters <- list()
+
+for (i in seq_along(vectors_gini_clusters)) {
+  df <- data.frame(
+    A = rownames(vectors_gini_clusters[[i]]),
+    Gini_value = as.numeric(vectors_gini_clusters[[i]]),
+    Cluster = clusters_gini[i]
+  )
+  gini_list_clusters[[i]] <- df
+}
+
+gini_combined_clusters <- do.call(rbind, gini_list_clusters)
+gini_combined_clusters$Cluster <- factor(gini_combined_clusters$Cluster, levels = c("C1", "C2", "C3", "C4"))
+
+
+```
+
+
+```{r}
+
+# Step 23: generate box plots to compare Gini coefficient among different clusters
+
+gini_plots_cluster <- ggplot(gini_combined_clusters, aes(x = Cluster, y = Gini_value, fill = Cluster)) +
+  geom_boxplot() +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("C1", "C2"), c("C1", "C3"), c("C1", "C4")),
+                     label = "p.signif") +
+  stat_compare_means(method = "kruskal.test", label = "p.format", vjust = -0.3, hjust = -4) +
+  labs(title = "Clonal Diversity Estimation across clusters C1-C4",
+       x = "Cluster",
+       y = "Gini coefficient",
+       fill = "Cluster") +
+  theme(
+  axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = custom_colors_clusters)
+
+
+```
+
+```{r}
+# Step 24: calculate statistics used in plot (clusters)
+
+wilcox_results <- compare_means(Gini_value ~ Cluster, data = gini_combined_clusters,
+                                method = "wilcox.test",
+                                comparisons = list(c("C1", "C2"), c("C1", "C3"), c("C1", "C4")))
+
+kruskal_results <- compare_means(Gini_value ~ Cluster, data = gini_combined_clusters, method = "kruskal.test")
+
+
+descriptive_stats_cluster <- gini_combined_clusters %>%
+  group_by(Cluster) %>%
+  summarise(
+    count = n(),
+    mean = mean(Gini_value, na.rm = TRUE),
+    median = median(Gini_value, na.rm = TRUE),
+    sd = sd(Gini_value, na.rm = TRUE),
+    min = min(Gini_value, na.rm = TRUE),
+    max = max(Gini_value, na.rm = TRUE),
+    IQR = IQR(Gini_value, na.rm = TRUE)
+  )
+
+print(descriptive_stats_cluster)
+```
+
